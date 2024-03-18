@@ -1,19 +1,22 @@
 #include "DemoServer.h"
 
+//threaded function for handling a clients connection
 void *handle_client(void *dereferencedSocket) 
 {
     string response;
     string clientMsg;
 
+    //get socket id from dereferenced parameter
     int clientSocket = *(int *)dereferencedSocket;
     
+    //declare a socket class
     Server socket(clientSocket, true);
 
     // Print the thread ID of the current thread and client socket
     pthread_t threadId = pthread_self();
-    cout << "Thread ID " << threadId << " handling client socket: " << clientSocket << endl;
+    cout << "Thread ID " << threadId << " handling client socket: " << clientSocket << endl << endl;
 
-    // Send initial instructions
+    // Send initial instructions to client
     socket.sendString("\nPQC Test Server\n===============\n\nType \"PQC-ON\" or \"PQC-OFF\" to set cryptography.\n");
 
     // Loop until user disconnects
@@ -22,12 +25,9 @@ void *handle_client(void *dereferencedSocket)
         // Get client msg, check for failure
         if (!socket.getString(clientMsg)) 
         {
-            // Print disconnect and end loop
-            cout << DISCONNECT_MSG << endl;
+            //end loop
             break;
         }
-        //clientMsg = "PQC-ON";
-        //cout << "\"" << clientMsg << "\"\n";
         
         //check for keywords
         if (clientMsg == "PQC-OFF")
@@ -50,10 +50,12 @@ void *handle_client(void *dereferencedSocket)
         // Send response to client
         socket.sendString(response);
 
+        //clear user input
         response.clear();
     }
 
-    cout << "Closing client connection" << endl;
+    //print disconnect msg
+    cout << DISCONNECT_MSG << endl << endl;
 
     // Exit thread
     pthread_exit(NULL);
@@ -78,6 +80,7 @@ int main(int argc, char** argv)
         {
             perror("Error accepting client\n");
         } 
+        //otherwise successful connection established
         else 
         {
             cout << "\nAccepted client" << endl;
@@ -91,6 +94,7 @@ int main(int argc, char** argv)
                 perror("Error creating thread for client connection. Closing socket\n");
                 close(clientSocket);
             } 
+            //otherwise we initialized thread successfully
             else 
             {
                 // Thread created successfully, handle_client has started
