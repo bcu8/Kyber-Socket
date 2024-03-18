@@ -1,30 +1,18 @@
 #ifndef DEMO_SERVER_H
 #define DEMO_SERVER_H
 
-/************************************************************************
- * Libraries
- ************************************************************************/
 #include "Socket.h"
 
 using namespace std;
 
-/************************************************************************
- * Function prototype declarations
- ************************************************************************/
-void *handle_client(void *dereferencedSocket); 
-
-/************************************************************************
- * Constants
- ************************************************************************/
-#define PORT 777             // port the server will listen on
-
+//port server will bind to/listen on
+#define PORT 777
 #define DISCONNECT_MSG "Client disconnected.\n"
+
+//threaded function for handling a clients connection
+void *handle_client(void *dereferencedSocket); 
 
 // number of pending connections in the connection queue
 #define NUM_CONNECTIONS 10
-
-/************************************************************************
- * Enumerations
- ************************************************************************/
 
 #endif /* DEMO_SERVER_H */

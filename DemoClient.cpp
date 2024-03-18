@@ -1,12 +1,12 @@
 #include "DemoClient.h"
 
-//declare client class and communicate with server using AES, PQC, BOTH, or NONE encryption type
 int main() 
 {
     string input;
     string response;
 
-    // Create a client which will attempt to connect to server on given port, set no encryption
+    // Create a client which will attempt to connect to server on given port
+    //cryptography handshake will automatically occur once connection is established
     Client client(SERVER_ADDR, PORT, true);
 
     // get initial instructions from server, exit if fail
@@ -34,6 +34,7 @@ int main()
             cout << "PQC enabled on client.\n";
         }
         
+        //clear last user input
         input.clear();
         cout << endl;
         
