@@ -44,7 +44,7 @@
  * Compilation options
  ************************************************************************/
 //toggle compiling cryptography support functions and variables
-#define CRYPTOGRAPHY true
+#define CRYPTOGRAPHY true 
 
 //comprehensive debugging information will be printed to terminal
 #define VERBOSE false
@@ -53,10 +53,9 @@
  * Headers
  ************************************************************************/
 
+//win/linux std libs
 #include <iostream>
 #include <string>
-
-// read/write/close
 #include <sys/types.h>
 #include <cstring>
 
@@ -69,10 +68,10 @@
 #include <openssl/err.h>
 #endif
 
-#ifdef _WIN32
+#ifdef _WIN32 //only include on windows
     #include <Winsock2.h>
     #include <ws2tcpip.h>
-#elif defined(__linux__)
+#elif defined(__linux__) //only include on linux
     #include <sys/socket.h>
     #include <netinet/in.h>
     #include <arpa/inet.h>
@@ -98,6 +97,8 @@ constexpr size_t SEED_LEN = 32;
 constexpr size_t KEY_LEN = 32;
 #endif
 
+#define MAX_MSG_LEN 500
+
 /************************************************************************
  * Socket class declaration
  ************************************************************************/
@@ -106,7 +107,7 @@ constexpr size_t KEY_LEN = 32;
 //you must use one of the subclasses. Use alternate Server() constructor in the case of a server 
 //accepting client connections and passing them to threads... other than that its self explanitory (call server for server, client for client)
 class Socket {
-protected:
+protected: //protected methods and variables can be accessed by the Socket class and its subclasses but not outside of these classes
     Socket() {}
     virtual ~Socket() {}
 
@@ -119,11 +120,12 @@ protected:
         unsigned char iv[AES_BLOCK_SIZE];
     };
 
+    //socket class encryption variables (available to client and server subclasses)
     bool initiator;
     bool applyCryptography;
-
-    // Define the encryption context structure
     CryptographyContext encryptionContext;
+
+    //socket class encryption methods (available to client and server subclasses)
     bool initAES();
     bool sendKeyData(const uint8_t* data, size_t dataSize);
     bool getKeyData(uint8_t* data, size_t dataSize);
@@ -137,9 +139,11 @@ protected:
     #endif //cryptography
 
 public:
+    //socket class variables (available to client and server subclasses)
     int socketId;
     bool autoPrintResponses;
 
+    //socket class methods (available to client and server subclasses)
     bool getString(string& str);
     bool sendString(string str);
     #if CRYPTOGRAPHY
@@ -153,7 +157,8 @@ public:
 
 class Client : public Socket {
 public:
-    //main client constructor
+    //client constructor attempts to connect to server on given port
+    //auto print allows getString() and related get methods to print incoming messages to terminal automatically
     Client(const string serverIp, const int port, const bool autoPrint);
 
     //destructor
@@ -170,8 +175,11 @@ public:
     Server(const int port, const int numServerThreads, const bool autoPrint, const bool portReuse);
     //alternate Server constructor (for server threads)
     Server( const int socket, const bool autoPrint);
+    //destructor
     ~Server();
+    //prevents wait time when restarting server on same port
     void allowPortReuse();
+    //wait for and accept client connections
     bool acceptConnection(int *client_socket);
 };
 
@@ -179,10 +187,11 @@ public:
  * Socket Methods (available to both Client and Server subclasses)
  ************************************************************************/
 
-//waits for string from connected socket. Incoming string must be followed by '\0' (as done in sendString())
+//waits for string from connected socket. expects length of string then string (as done in sendString())
 inline bool Socket::getString(string& str) {
     // Clear string before using it
     str.clear();
+    //pre-set result in case cryptography is disabled
     bool result = true;
 
     // Read the length of the incoming string
@@ -210,10 +219,11 @@ inline bool Socket::getString(string& str) {
         cout << str << endl;
     }
 
+    //return success / fail of decrypt
     return result;
 }
 
-//send given string to connected socket
+//send given string to connected socket. sends length of string followed by string
 inline bool Socket::sendString(string str) {
     bool result = true;
 
@@ -316,20 +326,20 @@ Client::Client(const string serverIp, const int port, const bool autoPrint)
         }
     #endif
 
-    #if CRYPTOGRAPHY
-    initiator = false;
+    #if CRYPTOGRAPHY 
+        initiator = false; //must be opposite of the initiator value of server
+        applyCryptography = true; //start with encryption / decryption enabled
 
-    applyCryptography = true;
-
-    //collaborate with connected party to get shared encryption key
-    setupEncryption();
+        //collaborate with connected party to get shared encryption key
+        setupEncryption();
     #endif
 }
 
 // Destructor
 Client::~Client() {
     #if CRYPTOGRAPHY
-    freeEncryptionContext();
+        //free cryptography resources
+        freeEncryptionContext();
     #endif
     
     // Close the client socket
@@ -346,14 +356,14 @@ Client::~Client() {
  ************************************************************************/
 
 // Constructor, creates socket, binds to port, then listens for incoming connections. 
+// connections can be accepted with acceptConnection()
 Server::Server(const int port, const int numServerThreads, bool autoPrint, bool portReuse) 
 {   
     autoPrintResponses = autoPrint;
     
     #if CRYPTOGRAPHY
-    applyCryptography = true;
-
-    initiator = true;
+    applyCryptography = true; //start with cryptography enabled
+    initiator = true; //differs from client
     #endif
     
     struct sockaddr_in server_address;
@@ -412,11 +422,11 @@ Server::Server( const int socket, const bool autoPrint)
     autoPrintResponses = autoPrint;
 
     #if CRYPTOGRAPHY
-    initiator = true;
-    applyCryptography = true;
+        initiator = true;
+        applyCryptography = true;
     
-    //collaborate with connected party to get shared encryption key
-    setupEncryption();
+        //collaborate with connected party to get shared encryption key
+        setupEncryption();
     #endif
 }
 
@@ -449,15 +459,15 @@ bool Server::acceptConnection(int *client_socket)
 //destructor
 Server::~Server() {
     #if CRYPTOGRAPHY
-    freeEncryptionContext();
+        freeEncryptionContext();
     #endif
 
     //free socket
     #ifdef _WIN32
-    closesocket(socketId);
-    WSACleanup();
+        closesocket(socketId);
+        WSACleanup();
     #else
-    close(socketId);
+        close(socketId);
     #endif
 }
 
@@ -476,7 +486,7 @@ bool Socket::sendKeyData(const uint8_t* data, size_t dataSize) {
     }
 
     #if VERBOSE
-    cout << "public key sent." << endl;
+        cout << "public key sent." << endl;
     #endif
 
     return true;
@@ -502,7 +512,7 @@ bool Socket::getKeyData(uint8_t* data, size_t dataSize)
     }
 
     #if VERBOSE
-    cout << "public key received: " << data;
+        cout << "public key received: " << data;
     #endif
 
     return true;
@@ -524,7 +534,7 @@ inline bool Socket::encrypt(string& str) {
         return true; // If cryptography is not applied, consider it successful
     }
 
-    unsigned char cipherText[500]; 
+    unsigned char cipherText[MAX_MSG_LEN]; 
     const unsigned char* plainText = reinterpret_cast<const unsigned char*>(str.c_str());
     int plainTextLength = str.length();
     int cipherTextLength;
@@ -569,7 +579,7 @@ inline bool Socket::decrypt(string& str) {
     printHex(str);
     #endif
 
-    unsigned char plainText[500]; 
+    unsigned char plainText[MAX_MSG_LEN]; 
     const unsigned char* cipherText = reinterpret_cast<const unsigned char*>(str.c_str());
     int cipherTextLength = str.length();
     int plainTextLength;
@@ -594,13 +604,13 @@ inline bool Socket::decrypt(string& str) {
     str.assign(reinterpret_cast<char*>(plainText), plainTextLength);
 
     #if VERBOSE
-    cout << "plain text output from decrypt(): " << str << endl;
+        cout << "plain text output from decrypt(): " << str << endl;
     #endif
 
     return true;
 }
 
-//initializes the encryption and decryption context
+//initializes the encryption and decryption contexts
 bool Socket::initAES() {
     // Initialize AES encryption context
     encryptionContext.encrypt_ctx = EVP_CIPHER_CTX_new();
@@ -674,7 +684,7 @@ void Socket::setupEncryption()
     std::vector<uint8_t> cp_pkey(kyber1024_kem::PKEY_LEN, 0);
     auto _cp_pkey = std::span<uint8_t, kyber1024_kem::PKEY_LEN>(cp_pkey);
     
-    //assert(sendKeyData(pkey.data(), _pkey.size()));
+    //get public key from communicating party
     assert(getKeyData(_cp_pkey.data(), _cp_pkey.size()));
 
     // fill up seed required for key encapsulation, using PRNG
@@ -712,7 +722,7 @@ void Socket::setupEncryption()
   }
   else
   {  
-    //assert(getKeyData(_cp_pkey.data(), _cp_pkey.size()));
+    //send public key to communicating party
     assert(sendKeyData(pkey.data(), _pkey.size()));
     
     //get encapsulated cipher
@@ -724,7 +734,7 @@ void Socket::setupEncryption()
     //obtain shared key
     rkdf.squeeze(_shrd_key);
 
-    //get iv
+    //get iv from communicating party
     assert( getKeyData(encryptionContext.iv, AES_BLOCK_SIZE) );
 
     #if VERBOSE
@@ -745,6 +755,7 @@ void Socket::setupEncryption()
   //store the key in class variable for later use
   encryptionContext.sharedKey.assign(shrd_key.begin(), shrd_key.end());
 
+     //initialize AES encryption and decryption contexts
      assert(initAES());    
 }
 
