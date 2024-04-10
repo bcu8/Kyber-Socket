@@ -1,4 +1,4 @@
-#include "DemoServer.h"
+#include "EncryptedServer.h"
 
 //threaded function for handling a clients connection
 void *handle_client(void *dereferencedSocket) 
