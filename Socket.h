@@ -54,7 +54,20 @@
 //select event based architecture (0 for epoll, 1 for poll, 2 for select)
 #define EVENT_BASED_ARCHITECTURE 2
 
-
+#if EVENT_BASED_ARCHITECTURE == 0
+    #define archType "EPOLL IS IN USE"
+#elif EVENT_BASED_ARCHITECTURE ==1
+    #define archType "POLL IS IN USE"
+#else
+    #define archType "SELECT IS IN USE"
+#endif
+#if EVENT_BASED
+#include <iostream>
+void snitch()
+{
+    std::cout << std::endl<< archType << std::endl;
+}
+#endif
 /************************************************************************
  * Headers
  ************************************************************************/
@@ -687,7 +700,6 @@ public:
 
     EventManager(int socket, int maxConnections) : serverSocket(socket), max_fd(socket)
     {
-        //zero the memory allocated to the fds set
         FD_ZERO(&readfds);
     }
 
