@@ -1,7 +1,7 @@
 /*********************************************************************************
  * File: Socket.h
  * Author: Brandon Udall 
- * Created: 3/12/2024
+ * Created: 4/7/2024
  * Last Modified: 3/16/2024
  * Version: 1.0
  * 
@@ -22,10 +22,10 @@
  * sub-classes.
  * 
  * License Information:
- * This code is provided under the Creative Commons CC0 1.0 Universal license.
- * You are free to use, modify, and distribute this code for any purpose without
- * any restrictions. However, the original copyright and license information
- * included in this header comment section must not be removed from the code.
+ * This code is provided under the MIT License.
+ * You are free to use, modify, and distribute this code for any purpose, 
+ * including commercial purposes, with or without attribution, as long as 
+ * the original copyright notice and license information are included.
  * 
  * Disclaimer:
  * This software is provided "as is," without warranty of any kind, express or
@@ -44,18 +44,25 @@
  * Compilation options
  ************************************************************************/
 //toggle compiling cryptography support functions and variables
-#define CRYPTOGRAPHY true 
+#define CRYPTOGRAPHY false
 
-//comprehensive debugging information will be printed to terminal
+//true = debugging information will be printed to terminal
 #define VERBOSE false
+
+//toggle compilation of event based support classes (only available on linux)
+#define EVENT_BASED true
+//select event based architecture (0 for epoll, 1 for poll, 2 for select)
+#define EVENT_BASED_ARCHITECTURE 2
+
 
 /************************************************************************
  * Headers
  ************************************************************************/
 
-//win/linux std libs
 #include <iostream>
 #include <string>
+
+// read/write/close
 #include <sys/types.h>
 #include <cstring>
 
@@ -68,10 +75,23 @@
 #include <openssl/err.h>
 #endif
 
-#ifdef _WIN32 //only include on windows
+#if EVENT_BASED && defined(__linux__)
+#if EVENT_BASED_ARCHITECTURE == 0
+#include <sys/epoll.h>
+#include <fcntl.h>
+#elif EVENT_BASED_ARCHITECTURE == 1
+#include <poll.h>
+#include <vector>
+#else
+#include <vector>
+#include <sys/select.h>
+#endif
+#endif
+
+#ifdef _WIN32
     #include <Winsock2.h>
     #include <ws2tcpip.h>
-#elif defined(__linux__) //only include on linux
+#elif defined(__linux__)
     #include <sys/socket.h>
     #include <netinet/in.h>
     #include <arpa/inet.h>
@@ -92,12 +112,15 @@ using namespace std;
 #define SOCKET_ERROR -1
 #endif
 
+#if EVENT_BASED 
+const int CONN_ATTEMPT = -100;
+const int MAX_FDS = 100;
+#endif
+
 #if CRYPTOGRAPHY
 constexpr size_t SEED_LEN = 32;
 constexpr size_t KEY_LEN = 32;
 #endif
-
-#define MAX_MSG_LEN 500
 
 /************************************************************************
  * Socket class declaration
@@ -107,9 +130,55 @@ constexpr size_t KEY_LEN = 32;
 //you must use one of the subclasses. Use alternate Server() constructor in the case of a server 
 //accepting client connections and passing them to threads... other than that its self explanitory (call server for server, client for client)
 class Socket {
-protected: //protected methods and variables can be accessed by the Socket class and its subclasses but not outside of these classes
-    Socket() {}
-    virtual ~Socket() {}
+public:
+    //Use this socket constructor when you want to interact with an established socket using class functionality
+    Socket( const int socket, const bool autoPrint)
+    {
+        socketId = socket;
+        autoPrintResponses = autoPrint;
+
+        #if defined(__linux__)
+        //prevent termination if writing to closed socket
+        signal(SIGPIPE, SIG_IGN);
+        #endif
+
+        #if CRYPTOGRAPHY
+        initiator = true;
+        applyCryptography = true;
+        
+        //collaborate with connected party to get shared encryption key
+        setupEncryption();
+        #endif
+    }
+
+    //this destructor is inherited for server and client subclasses
+    ~Socket() 
+    {
+        #if CRYPTOGRAPHY
+        freeEncryptionContext();
+        #endif
+
+        //free socket
+        #ifdef _WIN32
+        closesocket(socketId);
+        WSACleanup();
+        #else
+        close(socketId);
+        #endif
+    }
+
+protected:
+    //Socket sub-classes will inherit this constructor, then run their own specialized constructors
+    Socket()
+    {
+        //assign temp val to prevent compile warnings
+        socketId = -101;
+
+        #if defined(__linux__)
+        //prevent termination if writing to closed socket
+        signal(SIGPIPE, SIG_IGN);
+        #endif
+    }
 
     #if CRYPTOGRAPHY
     // Define the encryption context structure
@@ -120,12 +189,11 @@ protected: //protected methods and variables can be accessed by the Socket class
         unsigned char iv[AES_BLOCK_SIZE];
     };
 
-    //socket class encryption variables (available to client and server subclasses)
     bool initiator;
     bool applyCryptography;
-    CryptographyContext encryptionContext;
 
-    //socket class encryption methods (available to client and server subclasses)
+    // Define the encryption context structure
+    CryptographyContext encryptionContext;
     bool initAES();
     bool sendKeyData(const uint8_t* data, size_t dataSize);
     bool getKeyData(uint8_t* data, size_t dataSize);
@@ -139,11 +207,9 @@ protected: //protected methods and variables can be accessed by the Socket class
     #endif //cryptography
 
 public:
-    //socket class variables (available to client and server subclasses)
     int socketId;
     bool autoPrintResponses;
 
-    //socket class methods (available to client and server subclasses)
     bool getString(string& str);
     bool sendString(string str);
     #if CRYPTOGRAPHY
@@ -157,12 +223,97 @@ public:
 
 class Client : public Socket {
 public:
-    //client constructor attempts to connect to server on given port
-    //auto print allows getString() and related get methods to print incoming messages to terminal automatically
-    Client(const string serverIp, const int port, const bool autoPrint);
+    //constructor, attempts to establish connection to given server on given port
+    //if fail, runtime exception is thrown. Uses compiler directives to implement
+    //windows or linux sockets based on the platform the caller is using
+    Client(const string serverIp, const int port, const bool autoPrint)
+    : Socket()
+    {
+        autoPrintResponses = autoPrint;
+        
+        //check for windows os, if so run windows socket creation and establish connection
+        #ifdef _WIN32 
+            struct sockaddr_in server_address;
+            WSADATA wsaData;
+            int iResult;
 
-    //destructor
-    ~Client();
+            // Initialize Winsock
+            iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+            if (iResult != 0) 
+            {
+                cerr << "WSAStartup failed: " << iResult << endl;
+                throw runtime_error("WSAStartup failed");
+            }
+
+            // Create a socket for the client
+            socketId = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            if (socketId == (int)INVALID_SOCKET) 
+            {
+                cerr << "Error at socket(): " << WSAGetLastError() << endl;
+                WSACleanup();
+                throw runtime_error("Failed to create socket");
+            }
+
+            // Set up the server address structure
+            memset(&server_address, 0, sizeof(server_address));
+            server_address.sin_family = AF_INET;
+            server_address.sin_addr.s_addr = inet_addr(serverIp.c_str());
+            server_address.sin_port = htons(port);
+
+            // Connect to server
+            iResult = connect(socketId, reinterpret_cast<struct sockaddr*>(&server_address), sizeof(server_address));
+            if (iResult == SOCKET_ERROR) 
+            {
+                cerr << "Unable to connect to server: " << WSAGetLastError() << endl;
+                closesocket(socketId);
+                WSACleanup();
+                throw runtime_error("Failed to connect to server");
+            }
+
+        //check for linux, if so run linux socket creation and establish connection
+        #elif defined(__linux__) 
+            struct sockaddr_in client_address;
+            
+            // create an unnamed socket, and then name it
+            socketId = socket(AF_INET, SOCK_STREAM, 0);
+
+            // check for socket creation failure
+            if (socketId == -1) 
+            {
+                cerr << "Error at socket(): " << strerror(errno) << endl;
+                throw runtime_error("Failed to create socket");
+            }
+
+            // create addr struct
+            memset(&client_address, 0, sizeof(client_address));
+            client_address.sin_family = AF_INET;
+            client_address.sin_addr.s_addr = inet_addr(serverIp.c_str());
+            client_address.sin_port = htons(port);
+
+            // connect to server socket
+            if (connect(socketId, (struct sockaddr *)&client_address, sizeof(client_address)) == -1) 
+            {
+                cerr << "Unable to connect to server: " << strerror(errno) << endl;
+                close(socketId);
+                throw runtime_error("Failed to connect to server");
+            }
+        #endif
+
+        #if CRYPTOGRAPHY
+        initiator = false;
+
+        applyCryptography = true;
+
+        //collaborate with connected party to get shared encryption key
+        setupEncryption();
+        #endif
+    }
+
+    // Destructor for the Client class
+    ~Client() {
+        // Call the Socket destructor explicitly
+        Socket::~Socket();
+    }
 };
 
 /************************************************************************
@@ -171,15 +322,74 @@ public:
 
 class Server : public Socket {
 public:
-    //standard server constructor meant to accept client connections then create threads to handle connection
-    Server(const int port, const int numServerThreads, const bool autoPrint, const bool portReuse);
-    //alternate Server constructor (for server threads)
-    Server( const int socket, const bool autoPrint);
-    //destructor
-    ~Server();
-    //prevents wait time when restarting server on same port
+    // Constructor, creates socket, binds to port, then listens for incoming connections. 
+    Server(const int port, const int numServerThreads, bool autoPrint, bool portReuse)
+    : Socket()
+    {   
+        autoPrintResponses = autoPrint;
+        
+        #if CRYPTOGRAPHY
+        applyCryptography = true;
+
+        initiator = true;
+        #endif
+        
+        struct sockaddr_in server_address;
+
+        #ifdef _WIN32
+        WSADATA wsaData;
+        if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+            throw std::runtime_error("WSAStartup failed");
+        }
+        #endif
+
+        // Create an unnamed socket
+        socketId = socket(AF_INET, SOCK_STREAM, 0);
+
+        if (socketId == -1) {
+            #ifdef _WIN32
+            WSACleanup();
+            #endif
+            throw std::runtime_error("Error creating socket");
+        }
+
+        // Configure socket
+        server_address.sin_family = AF_INET;
+        server_address.sin_addr.s_addr = htonl(INADDR_ANY); // Accept clients on any interface
+        server_address.sin_port = htons(port); // Port to listen on
+
+        if (portReuse) {allowPortReuse();}
+
+        // Bind to port
+        if (bind(socketId, (struct sockaddr *)&server_address, sizeof(server_address)) == -1) {
+            #ifdef _WIN32
+            closesocket(socketId);
+            WSACleanup();
+            #else
+            close(socketId);
+            #endif
+            throw std::runtime_error("Error binding socket");
+        }
+
+        // Listen for client connections (pending connections get put into a queue)
+        if (listen(socketId, numServerThreads) == -1) {
+            #ifdef _WIN32
+            closesocket(socketId);
+            WSACleanup();
+            #else
+            close(socketId);
+            #endif
+            throw std::runtime_error("Error listening on socket");
+        }
+    }
+
+    // Destructor for the Server class
+    ~Server() {
+        // Call the Socket destructor explicitly
+        Socket::~Socket();
+    }
+
     void allowPortReuse();
-    //wait for and accept client connections
     bool acceptConnection(int *client_socket);
 };
 
@@ -187,28 +397,34 @@ public:
  * Socket Methods (available to both Client and Server subclasses)
  ************************************************************************/
 
-//waits for string from connected socket. expects length of string then string (as done in sendString())
+//waits for string from connected socket. Incoming string must be followed by '\0' (as done in sendString())
 inline bool Socket::getString(string& str) {
     // Clear string before using it
     str.clear();
-    //pre-set result in case cryptography is disabled
     bool result = true;
-
-    // Read the length of the incoming string
-    int length;
-    if (recv(socketId, reinterpret_cast<char*>(&length), sizeof(length), 0) <= 0) {
-        return false; // Connection disruption or error
+    char currentChar;
+    
+    //receive string character by character until null char is received
+    while(recv(socketId, &currentChar, sizeof(currentChar), 0) > 0)
+    {
+        //break if null char
+        if (currentChar == '\0')
+        {
+            break;
+        }
+        //append char to string
+        str += currentChar;
     }
 
-    // Resize the string to accommodate the incoming data
-    str.resize(length);
-
-    // Receive the data
-    int bytesReceived = recv(socketId, &str[0], length, 0);
-    if (bytesReceived <= 0) {
-        return false; // Connection disruption or error
+    if (str.length() == 0)
+    {
+        return false;
     }
-
+    
+    #if VERBOSE
+        cout << "String received: " << str << endl << endl;
+    #endif
+    
     #if CRYPTOGRAPHY
     // Decrypt the message
     result = decrypt(str);
@@ -219,12 +435,12 @@ inline bool Socket::getString(string& str) {
         cout << str << endl;
     }
 
-    //return success / fail of decrypt
     return result;
 }
 
-//send given string to connected socket. sends length of string followed by string
-inline bool Socket::sendString(string str) {
+//send given string to connected socket (terminate transmission with \0)
+inline bool Socket::sendString(string str) 
+{
     bool result = true;
 
     #if CRYPTOGRAPHY
@@ -232,15 +448,15 @@ inline bool Socket::sendString(string str) {
     result = encrypt(str);
     #endif
 
-    // Send the length of the string first
-    int length = str.length();
-    if (send(socketId, reinterpret_cast<const char*>(&length), sizeof(length), 0) != sizeof(length)) {
-        return false; // Error in sending length
-    }
+    #if VERBOSE
+        cout << "String to send: " << str << " with length :" << str.length() << endl << endl;
+    #endif
 
+    int transmissionLen = str.length() +1;
+    
     // Send the data
-    int sendResult = send(socketId, str.c_str(), length, 0);
-    if (sendResult != length) {
+    int sendResult = send(socketId, str.c_str(), transmissionLen, 0);
+    if (sendResult != transmissionLen) {
         return false; // Error in sending data
     }
 
@@ -248,188 +464,8 @@ inline bool Socket::sendString(string str) {
 }
 
 /************************************************************************
- * Client Class Methods
- ************************************************************************/
-
-//constructor, attempts to establish connection to given server on given port
-//if fail, runtime exception is thrown. Uses compiler directives to implement
-//windows or linux sockets based on the platform the caller is using
-Client::Client(const string serverIp, const int port, const bool autoPrint)
-{
-    autoPrintResponses = autoPrint;
-    
-    //check for windows os, if so run windows socket creation and establish connection
-    #ifdef _WIN32 
-        struct sockaddr_in server_address;
-        WSADATA wsaData;
-        int iResult;
-
-        // Initialize Winsock
-        iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
-        if (iResult != 0) 
-        {
-            cerr << "WSAStartup failed: " << iResult << endl;
-            throw runtime_error("WSAStartup failed");
-        }
-
-        // Create a socket for the client
-        socketId = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (socketId == (int)INVALID_SOCKET) 
-        {
-            cerr << "Error at socket(): " << WSAGetLastError() << endl;
-            WSACleanup();
-            throw runtime_error("Failed to create socket");
-        }
-
-        // Set up the server address structure
-        memset(&server_address, 0, sizeof(server_address));
-        server_address.sin_family = AF_INET;
-        server_address.sin_addr.s_addr = inet_addr(serverIp.c_str());
-        server_address.sin_port = htons(port);
-
-        // Connect to server
-        iResult = connect(socketId, reinterpret_cast<struct sockaddr*>(&server_address), sizeof(server_address));
-        if (iResult == SOCKET_ERROR) 
-        {
-            cerr << "Unable to connect to server: " << WSAGetLastError() << endl;
-            closesocket(socketId);
-            WSACleanup();
-            throw runtime_error("Failed to connect to server");
-        }
-
-    //check for linux, if so run linux socket creation and establish connection
-    #elif defined(__linux__) 
-        struct sockaddr_in client_address;
-        
-        // create an unnamed socket, and then name it
-        socketId = socket(AF_INET, SOCK_STREAM, 0);
-
-        // check for socket creation failure
-        if (socketId == -1) 
-        {
-            cerr << "Error at socket(): " << strerror(errno) << endl;
-            throw runtime_error("Failed to create socket");
-        }
-
-        // create addr struct
-        memset(&client_address, 0, sizeof(client_address));
-        client_address.sin_family = AF_INET;
-        client_address.sin_addr.s_addr = inet_addr(serverIp.c_str());
-        client_address.sin_port = htons(port);
-
-        // connect to server socket
-        if (connect(socketId, (struct sockaddr *)&client_address, sizeof(client_address)) == -1) 
-        {
-            cerr << "Unable to connect to server: " << strerror(errno) << endl;
-            close(socketId);
-            throw runtime_error("Failed to connect to server");
-        }
-    #endif
-
-    #if CRYPTOGRAPHY 
-        initiator = false; //must be opposite of the initiator value of server
-        applyCryptography = true; //start with encryption / decryption enabled
-
-        //collaborate with connected party to get shared encryption key
-        setupEncryption();
-    #endif
-}
-
-// Destructor
-Client::~Client() {
-    #if CRYPTOGRAPHY
-        //free cryptography resources
-        freeEncryptionContext();
-    #endif
-    
-    // Close the client socket
-    #ifdef _WIN32
-        closesocket(socketId);
-        WSACleanup();
-    #elif defined(__linux__)
-        close(socketId);
-    #endif
-}
-
-/************************************************************************
  * Server Class Methods
  ************************************************************************/
-
-// Constructor, creates socket, binds to port, then listens for incoming connections. 
-// connections can be accepted with acceptConnection()
-Server::Server(const int port, const int numServerThreads, bool autoPrint, bool portReuse) 
-{   
-    autoPrintResponses = autoPrint;
-    
-    #if CRYPTOGRAPHY
-    applyCryptography = true; //start with cryptography enabled
-    initiator = true; //differs from client
-    #endif
-    
-    struct sockaddr_in server_address;
-
-    #ifdef _WIN32
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        throw std::runtime_error("WSAStartup failed");
-    }
-    #endif
-
-    // Create an unnamed socket
-    socketId = socket(AF_INET, SOCK_STREAM, 0);
-
-    if (socketId == -1) {
-        #ifdef _WIN32
-        WSACleanup();
-        #endif
-        throw std::runtime_error("Error creating socket");
-    }
-
-    // Configure socket
-    server_address.sin_family = AF_INET;
-    server_address.sin_addr.s_addr = htonl(INADDR_ANY); // Accept clients on any interface
-    server_address.sin_port = htons(port); // Port to listen on
-
-    if (portReuse) {allowPortReuse();}
-
-    // Bind to port
-    if (bind(socketId, (struct sockaddr *)&server_address, sizeof(server_address)) == -1) {
-        #ifdef _WIN32
-        closesocket(socketId);
-        WSACleanup();
-        #else
-        close(socketId);
-        #endif
-        throw std::runtime_error("Error binding socket");
-    }
-
-    // Listen for client connections (pending connections get put into a queue)
-    if (listen(socketId, numServerThreads) == -1) {
-        #ifdef _WIN32
-        closesocket(socketId);
-        WSACleanup();
-        #else
-        close(socketId);
-        #endif
-        throw std::runtime_error("Error listening on socket");
-    }
-}
-
-//Alternate constructor, use this one when you make a thread for a client connection
-Server::Server( const int socket, const bool autoPrint)
-{
-    socketId = socket;
-    autoPrintResponses = autoPrint;
-
-    #if CRYPTOGRAPHY
-        initiator = true;
-        applyCryptography = true;
-    
-        //collaborate with connected party to get shared encryption key
-        setupEncryption();
-    #endif
-}
-
 //prevent wait time after restarting server on the same port
 void Server::allowPortReuse() 
 {
@@ -456,20 +492,265 @@ bool Server::acceptConnection(int *client_socket)
     return true;
 }
 
-//destructor
-Server::~Server() {
-    #if CRYPTOGRAPHY
-        freeEncryptionContext();
-    #endif
+/************************************************************************
+ * Event Manager Classes (Can be declared and used alongside server to create
+ * an event based server)
+ ************************************************************************/
 
-    //free socket
-    #ifdef _WIN32
-        closesocket(socketId);
-        WSACleanup();
-    #else
-        close(socketId);
-    #endif
+#if EVENT_BASED && defined(__linux__)
+
+/************************************************************************
+ * Epoll implementation
+ ************************************************************************/
+
+#if EVENT_BASED_ARCHITECTURE == 0
+class EventManager {
+
+public:
+    //declare vars
+    struct epoll_event newConnectionEvent;
+    struct epoll_event *events;
+    int epollFD;
+    int serverSocket;
+    int pendingEvents;
+
+    //wait for event and return the type of event that occurred   
+    int waitForEvent();
+
+    //creates a new epoll instance for monitoring client socket for events
+    void monitorClient(int clientSocket);
+    void stopMonitoring(int clientSocket);
+
+    //default constructor initializes the epoll instance and events struct
+    //the server socket will be monitored for incoming events, i.e. connection requests
+    //and messages from client
+    EventManager(int socket, int maxConnections)
+    {
+        serverSocket = socket;
+
+        //init an epoll instance which has a queue NUM_CONNECTIONS long
+        epollFD = epoll_create(maxConnections);
+        
+        // Set the file descriptor to monitor
+        newConnectionEvent.data.fd = serverSocket;
+
+        // Specify the event(s) to monitor for
+        newConnectionEvent.events = EPOLLIN; 
+
+        // Add the server socket to the epoll instance
+        epoll_ctl(epollFD, EPOLL_CTL_ADD, serverSocket, &newConnectionEvent);
+        
+        // Allocate memory for an array of epoll events to store event notifications
+        events = (epoll_event*)malloc(MAX_FDS*sizeof(struct epoll_event));
+    }
+
+    //destructor
+    ~EventManager()
+    {
+        // Close the epoll instance
+        close(epollFD);
+
+        // Free the memory allocated for the events array
+        free(events);
+    }
+};
+
+int EventManager::waitForEvent()
+{
+    pendingEvents = epoll_wait(epollFD, events, MAX_FDS, -1);
+
+    //check for new connection request
+    if (events[0].data.fd == serverSocket) 
+    {
+        return CONN_ATTEMPT;
+    }
+    //otherwise we received data from an existing client connection
+    else 
+    {
+        //return client socket
+        return events[0].data.fd;
+    }
 }
+
+void EventManager::monitorClient(int clientSocket)
+{
+    // Create an epoll event structure for the client socket
+    struct epoll_event event;
+    event.data.fd = clientSocket; // Associate the client socket with the event struct
+    event.events = EPOLLIN; //Monitor for incoming data from client
+
+    // Add the client socket to the epoll instance to begin monitoring
+    epoll_ctl(epollFD, EPOLL_CTL_ADD, clientSocket, &event);
+}
+
+void EventManager::stopMonitoring(int clientSocket)
+{
+    //remove the client socket from epoll monitoring
+    epoll_ctl(epollFD, EPOLL_CTL_DEL, clientSocket, NULL);
+}
+
+/************************************************************************
+ * poll implementation (epoll is more efficient, consider using that)
+ ************************************************************************/
+
+#elif EVENT_BASED_ARCHITECTURE == 1 
+
+#define MAX_FDS 1024 // Maximum number of file descriptors to monitor
+
+class EventManager {
+public:
+    //declare vars
+    int serverSocket;
+    std::vector<pollfd> pollFds; // Vector to store pollfd structures for each socket
+
+    //wait for event and return the type of event that occurred   
+    int waitForEvent();
+
+    //creates a new pollfd structure for monitoring client socket for events
+    void monitorClient(int clientSocket);
+    void stopMonitoring(int clientSocket);
+
+    //default constructor initializes the pollfds vector
+    //the server socket will be monitored for incoming events, i.e. connection requests
+    //and messages from client
+    EventManager(int socket, int maxConnections)
+    {
+        serverSocket = socket;
+
+        // Add the server socket to the pollfds vector
+        pollfd serverPollFd;
+        serverPollFd.fd = serverSocket;
+        serverPollFd.events = POLLIN; // Monitor for incoming data
+        pollFds.push_back(serverPollFd);
+    }
+
+    //destructor
+    ~EventManager()
+    {
+        // No need to close anything for poll-based implementation
+    }
+};
+
+int EventManager::waitForEvent()
+{
+    // Call poll to wait for events
+    int readyFds = poll(pollFds.data(), pollFds.size(), -1);
+    if (readyFds > 0) {
+        // Check which file descriptor has an event
+        for (size_t i = 0; i < pollFds.size(); ++i) {
+            if (pollFds[i].revents & POLLIN) {
+                // Check if it's the server socket
+                if (pollFds[i].fd == serverSocket) {
+                    return CONN_ATTEMPT;
+                } else {
+                    // Otherwise, return client socket
+                    return pollFds[i].fd;
+                }
+            }
+        }
+    }
+    return -1; // No event occurred or error
+}
+
+void EventManager::monitorClient(int clientSocket)
+{
+    // Create a new pollfd structure for the client socket
+    pollfd clientPollFd;
+    clientPollFd.fd = clientSocket;
+    clientPollFd.events = POLLIN; // Monitor for incoming data
+    pollFds.push_back(clientPollFd);
+}
+
+void EventManager::stopMonitoring(int clientSocket)
+{
+    // Find the pollfd associated with the client socket and remove it
+    for (auto it = pollFds.begin(); it != pollFds.end(); ++it) {
+        if (it->fd == clientSocket) {
+            pollFds.erase(it);
+            break;
+        }
+    }
+}
+
+/************************************************************************
+ * select implementation (archaic and outdated. Only use on legacy systems)
+ ************************************************************************/
+
+#elif EVENT_BASED_ARCHITECTURE == 2 //select
+
+class EventManager {
+public:
+    int serverSocket;
+    int max_fd;
+    fd_set readfds;
+    std::vector<int> clientSockets;
+
+    EventManager(int socket, int maxConnections) : serverSocket(socket), max_fd(socket)
+    {
+        //zero the memory allocated to the fds set
+        FD_ZERO(&readfds);
+    }
+
+    // Wait for events on server and client sockets
+    int waitForEvent() {
+    while (true) {
+        FD_SET(serverSocket, &readfds);
+
+        // Add all client sockets to the set
+        for (int clientSocket : clientSockets) {
+            FD_SET(clientSocket, &readfds);
+            if (clientSocket > max_fd) {
+                max_fd = clientSocket;
+            }
+        }
+
+        timeval timeout;
+        timeout.tv_sec = 3; // 3 seconds timeout
+        timeout.tv_usec = 0;
+
+        int result = select(max_fd + 1, &readfds, NULL, NULL, &timeout);
+        if (result == -1) {
+            std::cerr << "Error in select" << std::endl;
+            return -1;
+        } else if (result > 0) {
+            // Check if server socket has an event
+            if (FD_ISSET(serverSocket, &readfds)) {
+                return CONN_ATTEMPT;
+            }
+
+            // Check if any client socket has an event
+            for (int clientSocket : clientSockets) {
+                if (FD_ISSET(clientSocket, &readfds)) {
+                    return clientSocket; // Return the client socket with the event
+                }
+            }
+        }
+        // If no event occurred, continue looping
+    }
+}
+
+    void monitorClient(int clientSocket) {
+    // Add the client socket to the list of monitored sockets
+    clientSockets.push_back(clientSocket);
+
+    // Add the new client socket to the set of file descriptors to monitor
+    FD_SET(clientSocket, &readfds);
+
+    // Update max_fd if necessary
+    if (clientSocket > max_fd) {
+        max_fd = clientSocket;
+    }
+}
+
+    void stopMonitoring(int clientSocket) {
+        // No need to stop monitoring individual clients with select
+    }
+};
+
+#endif //event based architecture decision
+
+#endif //event based 
+
 
 /************************************************************************
  * Socket Cryptography Methods (available to both server and client sub-classes)
@@ -486,7 +767,7 @@ bool Socket::sendKeyData(const uint8_t* data, size_t dataSize) {
     }
 
     #if VERBOSE
-        cout << "public key sent." << endl;
+    cout << "public key sent." << endl;
     #endif
 
     return true;
@@ -512,7 +793,7 @@ bool Socket::getKeyData(uint8_t* data, size_t dataSize)
     }
 
     #if VERBOSE
-        cout << "public key received: " << data;
+    cout << "public key received: " << data;
     #endif
 
     return true;
@@ -534,7 +815,7 @@ inline bool Socket::encrypt(string& str) {
         return true; // If cryptography is not applied, consider it successful
     }
 
-    unsigned char cipherText[MAX_MSG_LEN]; 
+    unsigned char cipherText[500]; 
     const unsigned char* plainText = reinterpret_cast<const unsigned char*>(str.c_str());
     int plainTextLength = str.length();
     int cipherTextLength;
@@ -579,7 +860,7 @@ inline bool Socket::decrypt(string& str) {
     printHex(str);
     #endif
 
-    unsigned char plainText[MAX_MSG_LEN]; 
+    unsigned char plainText[500]; 
     const unsigned char* cipherText = reinterpret_cast<const unsigned char*>(str.c_str());
     int cipherTextLength = str.length();
     int plainTextLength;
@@ -604,13 +885,13 @@ inline bool Socket::decrypt(string& str) {
     str.assign(reinterpret_cast<char*>(plainText), plainTextLength);
 
     #if VERBOSE
-        cout << "plain text output from decrypt(): " << str << endl;
+    cout << "plain text output from decrypt(): " << str << endl;
     #endif
 
     return true;
 }
 
-//initializes the encryption and decryption contexts
+//initializes the encryption and decryption context
 bool Socket::initAES() {
     // Initialize AES encryption context
     encryptionContext.encrypt_ctx = EVP_CIPHER_CTX_new();
@@ -684,7 +965,7 @@ void Socket::setupEncryption()
     std::vector<uint8_t> cp_pkey(kyber1024_kem::PKEY_LEN, 0);
     auto _cp_pkey = std::span<uint8_t, kyber1024_kem::PKEY_LEN>(cp_pkey);
     
-    //get public key from communicating party
+    //assert(sendKeyData(pkey.data(), _pkey.size()));
     assert(getKeyData(_cp_pkey.data(), _cp_pkey.size()));
 
     // fill up seed required for key encapsulation, using PRNG
@@ -722,7 +1003,7 @@ void Socket::setupEncryption()
   }
   else
   {  
-    //send public key to communicating party
+    //assert(getKeyData(_cp_pkey.data(), _cp_pkey.size()));
     assert(sendKeyData(pkey.data(), _pkey.size()));
     
     //get encapsulated cipher
@@ -734,7 +1015,7 @@ void Socket::setupEncryption()
     //obtain shared key
     rkdf.squeeze(_shrd_key);
 
-    //get iv from communicating party
+    //get iv
     assert( getKeyData(encryptionContext.iv, AES_BLOCK_SIZE) );
 
     #if VERBOSE
@@ -755,7 +1036,6 @@ void Socket::setupEncryption()
   //store the key in class variable for later use
   encryptionContext.sharedKey.assign(shrd_key.begin(), shrd_key.end());
 
-     //initialize AES encryption and decryption contexts
      assert(initAES());    
 }
 
