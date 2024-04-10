@@ -1,4 +1,4 @@
-#include "DemoClient.h"
+#include "EncryptedClient.h"
 
 int main() 
 {

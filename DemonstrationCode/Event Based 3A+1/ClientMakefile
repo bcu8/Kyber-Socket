@@ -1,0 +1,34 @@
+# Makefile for compiling the program along with Kyber library and OpenSSL
+
+# Compiler
+CXX=g++
+# Compiler flags for debugging
+CXXFLAGS=-std=c++20 -Wall -O3 -march=native -g
+# Paths to Kyber headers
+KYBER_HEADERS=~/kyber/include
+SHA3_HEADERS=~/kyber/sha3/include
+SUBTLE_HEADERS=~/kyber/subtle/include
+# Source files
+SRCS=EventBased3A+1.cpp
+# Executable name
+TARGET=serv
+
+# Rule for compiling .cpp files
+%.o: %.cpp
+	$(CXX) $(CXXFLAGS) -I$(KYBER_HEADERS) -I$(SHA3_HEADERS) -I$(SUBTLE_HEADERS) -c $< -o $@
+
+# Rule for linking object files into executable
+$(TARGET): $(SRCS:.cpp=.o)
+	$(CXX) $(CXXFLAGS) -o $@ $^ -lssl -lcrypto
+
+# Declare source files as phony to force recompilation
+.PHONY: $(SRCS)
+
+.PHONY: clean
+
+clean:
+	rm -f $(TARGET) $(SRCS:.cpp=.o)
+
+# Target for running the program with GDB
+run-gdb: $(TARGET)
+	gdb ./$(TARGET)
