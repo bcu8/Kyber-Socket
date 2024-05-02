@@ -127,7 +127,6 @@ using namespace std;
 
 #if EVENT_BASED 
 const int CONN_ATTEMPT = -100;
-const int MAX_FDS = 100;
 #endif
 
 #if CRYPTOGRAPHY
@@ -526,6 +525,7 @@ public:
     int epollFD;
     int serverSocket;
     int pendingEvents;
+    int maxFDS;
 
     //wait for event and return the type of event that occurred   
     int waitForEvent();
@@ -541,8 +541,10 @@ public:
     {
         serverSocket = socket;
 
+        maxFDS=maxConnections;
+
         //init an epoll instance which has a queue NUM_CONNECTIONS long
-        epollFD = epoll_create(maxConnections);
+        epollFD = epoll_create(maxFDS);
         
         // Set the file descriptor to monitor
         newConnectionEvent.data.fd = serverSocket;
@@ -554,7 +556,7 @@ public:
         epoll_ctl(epollFD, EPOLL_CTL_ADD, serverSocket, &newConnectionEvent);
         
         // Allocate memory for an array of epoll events to store event notifications
-        events = (epoll_event*)malloc(MAX_FDS*sizeof(struct epoll_event));
+        events = (epoll_event*)malloc(maxFDS*sizeof(struct epoll_event));
     }
 
     //destructor
@@ -570,7 +572,7 @@ public:
 
 int EventManager::waitForEvent()
 {
-    pendingEvents = epoll_wait(epollFD, events, MAX_FDS, -1);
+    pendingEvents = epoll_wait(epollFD, events, maxFDS, -1);
 
     //check for new connection request
     if (events[0].data.fd == serverSocket) 
@@ -607,8 +609,6 @@ void EventManager::stopMonitoring(int clientSocket)
  ************************************************************************/
 
 #elif EVENT_BASED_ARCHITECTURE == 1 
-
-#define MAX_FDS 1024 // Maximum number of file descriptors to monitor
 
 class EventManager {
 public:
@@ -698,14 +698,16 @@ public:
     fd_set readfds;
     std::vector<int> clientSockets;
 
-    EventManager(int socket, int maxConnections) : serverSocket(socket), max_fd(socket)
+    EventManager(int socket, int maxConnections) : serverSocket(socket)
     {
-        FD_ZERO(&readfds);
+        max_fd = serverSocket;
     }
 
     // Wait for events on server and client sockets
     int waitForEvent() {
     while (true) {
+
+        FD_ZERO(&readfds);
         FD_SET(serverSocket, &readfds);
 
         // Add all client sockets to the set
@@ -722,7 +724,7 @@ public:
 
         int result = select(max_fd + 1, &readfds, NULL, NULL, &timeout);
         if (result == -1) {
-            std::cerr << "Error in select" << std::endl;
+            std::cerr << "Error in select" << strerror(errno) << std::endl;
             return -1;
         } else if (result > 0) {
             // Check if server socket has an event
@@ -745,9 +747,6 @@ public:
     // Add the client socket to the list of monitored sockets
     clientSockets.push_back(clientSocket);
 
-    // Add the new client socket to the set of file descriptors to monitor
-    FD_SET(clientSocket, &readfds);
-
     // Update max_fd if necessary
     if (clientSocket > max_fd) {
         max_fd = clientSocket;
@@ -755,8 +754,22 @@ public:
 }
 
     void stopMonitoring(int clientSocket) {
-        // No need to stop monitoring individual clients with select
+    auto it = std::find(clientSockets.begin(), clientSockets.end(), clientSocket);
+    if (it != clientSockets.end()) {
+        clientSockets.erase(it);
+
+        // Update max_fd if necessary
+        if (clientSocket == max_fd) {
+            // Find the new maximum file descriptor
+            max_fd = serverSocket;
+            for (int socket : clientSockets) {
+                if (socket > max_fd) {
+                    max_fd = socket;
+                }
+            }
+        }
     }
+}
 };
 
 #endif //event based architecture decision
